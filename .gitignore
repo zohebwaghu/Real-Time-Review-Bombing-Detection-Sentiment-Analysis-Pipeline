@@ -1,0 +1,41 @@
+# Environment
+.env
+
+# PDF documents (submitted separately)
+*.pdf
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+
+# Models (large binary files)
+models/sentiment_pipeline/
+models/*.pkl
+
+# Data (large dataset files)
+data/review.json
+data/business.json
+
+# XAI reports (generated output)
+xai_reports/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Spark
+metastore_db/
+derby.log
+spark-warehouse/
+
+# Checkpoints
+checkpoints/
