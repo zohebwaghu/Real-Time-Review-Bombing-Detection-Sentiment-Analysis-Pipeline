@@ -27,7 +27,7 @@ import json
 import logging
 import random
 import time
-from datetime import datetime
+from datetime import datetime, UTC
 
 from faker import Faker
 from kafka import KafkaProducer
@@ -92,7 +92,7 @@ def generate_attack_review(target_biz_id: str) -> dict:
         "business_id": target_biz_id,
         "stars":       random.choices([1, 1, 1, 1, 2], weights=[8, 8, 8, 8, 1])[0],
         "text":        text,
-        "date":        datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+        "date":        datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S"),
         "useful": 0, "funny": 0, "cool": 0,
         "is_injected": True,   # ground truth for evaluation only
     }

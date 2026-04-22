@@ -12,7 +12,7 @@ import json
 import os
 import numpy as np
 import pickle
-from datetime import datetime
+from datetime import datetime, UTC
 
 import shap
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -96,7 +96,7 @@ class ReviewXAIExplainer:
         text_lengths = [len(r.get('text', '')) for r in reviews]
 
         return {
-            "alert_timestamp": datetime.utcnow().isoformat(),
+            "alert_timestamp": datetime.now(UTC).isoformat(),
             "business_id": reviews[0].get("business_id", "unknown"),
             "num_flagged_reviews": len(reviews),
             "top_attack_signals": top_signals,

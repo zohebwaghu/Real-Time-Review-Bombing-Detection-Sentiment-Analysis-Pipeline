@@ -22,6 +22,7 @@ Usage:
 import argparse
 import json
 import logging
+import os
 import time
 
 from kafka import KafkaProducer
@@ -70,6 +71,12 @@ def stream_reviews(
     count = 0
     errors = 0
     start = time.time()
+
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(
+            f"Review data file not found: {filepath}. "
+            "Mount the Yelp dataset into /data before starting the producer."
+        )
 
     with open(filepath, "r", encoding="utf-8") as fh:
         for raw_line in fh:
@@ -134,4 +141,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     p = create_producer(args.bootstrap)
-    stream_reviews(args.file, p, args.topic, args.rate, args.max)
+    try:
+        stream_reviews(args.file, p, args.topic, args.rate, args.max)
+    except FileNotFoundError as exc:
+        log.error("%s", exc)
+        raise SystemExit(1) from exc

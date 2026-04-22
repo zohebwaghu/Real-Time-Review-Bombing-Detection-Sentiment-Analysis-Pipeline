@@ -125,6 +125,14 @@ class TestStreamReviews(unittest.TestCase):
         mock_producer.flush.assert_called()
         os.unlink(path)
 
+    def test_missing_input_file_raises_clear_error(self):
+        mock_producer = MagicMock()
+
+        with self.assertRaises(FileNotFoundError) as ctx:
+            stream_reviews("/tmp/does-not-exist-review.json", mock_producer, rate=1000)
+
+        self.assertIn("Review data file not found", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()
