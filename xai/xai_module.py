@@ -12,7 +12,7 @@ import json
 import os
 import numpy as np
 import pickle
-from datetime import datetime, UTC
+from datetime import datetime, timezone
 
 import shap
 from sklearn.feature_extraction.text import TfidfVectorizer
