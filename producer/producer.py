@@ -145,4 +145,4 @@ if __name__ == "__main__":
         stream_reviews(args.file, p, args.topic, args.rate, args.max)
     except FileNotFoundError as exc:
         log.error("%s", exc)
-        raise SystemExit(1) from exc
+        raise SystemExit(1)
