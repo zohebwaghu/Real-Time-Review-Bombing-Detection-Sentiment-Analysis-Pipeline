@@ -15,7 +15,7 @@ CREATE EXTERNAL TABLE IF NOT EXISTS organic_reviews (
     ingestion_time TIMESTAMP
 )
 STORED AS PARQUET
-LOCATION 's3://your-bucket/organic-reviews/'
+LOCATION 's3://review-bombing-group09-841162702678-us-west-1-an/organic-reviews/'
 TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 
 
@@ -34,7 +34,7 @@ CREATE EXTERNAL TABLE IF NOT EXISTS quarantined_reviews (
     ingestion_time TIMESTAMP
 )
 STORED AS PARQUET
-LOCATION 's3://your-bucket/quarantined-reviews/'
+LOCATION 's3://review-bombing-group09-841162702678-us-west-1-an/quarantined-reviews/'
 TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 
 

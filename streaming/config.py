@@ -37,7 +37,7 @@ SENTIMENT_MODEL_PATH = os.getenv(
 )
 
 # ── S3 Output Paths ─────────────────────────────────────────────
-S3_BUCKET               = os.getenv("S3_BUCKET", "review-bombing-group09")
+S3_BUCKET               = os.getenv("S3_BUCKET", "review-bombing-group09-841162702678-us-west-1-an")
 S3_ORGANIC_PATH         = f"s3a://{S3_BUCKET}/organic-reviews/"
 S3_QUARANTINED_PATH     = f"s3a://{S3_BUCKET}/quarantined-reviews/"
 S3_CHECKPOINT_ORGANIC   = f"s3a://{S3_BUCKET}/checkpoints/organic/"
