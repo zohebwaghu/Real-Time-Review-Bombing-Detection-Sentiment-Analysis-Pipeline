@@ -226,27 +226,27 @@ anomalous_windows = (
 
 
 # ══════════════════════════════════════════════════════════════
-# STEP 4: STREAM-STREAM JOIN WITH TIME-RANGE CONDITION
+# STEP 4: SPLIT-SINK APPROACH
 #
-# Spark requires a time-range condition on stream-stream left outer joins
-# so it can bound the state it needs to retain for both sides.
+# Spark's stream-stream LeftOuter join requires very strict watermark
+# conditions that are difficult to satisfy when the right side emits
+# window aggregates (not raw events).
 #
-# Condition: a review is labeled quarantined if its event_time falls
-# within an anomaly detection window for the same business.
+# Instead we use two independent sinks:
+#   • organic_sink  — all scored reviews go here (full fidelity)
+#   • quarantine_sink — INNER join of reviews with anomaly windows;
+#     only reviews whose business_id appears in an active anomaly
+#     window are written here.  Athena deduplicates on read.
 # ══════════════════════════════════════════════════════════════
 
-labeled = (
+quarantined = (
     sentiment_df.join(
         anomalous_windows,
         (sentiment_df.business_id == anomalous_windows.anom_business_id) &
-        (sentiment_df.event_time >= anomalous_windows.window_start) &
-        (sentiment_df.event_time <= anomalous_windows.window_end +
-         expr("INTERVAL 2 MINUTES")),   # small buffer for clock skew
-        how="left",
-    )
-    .withColumn("label",
-        when(col("anom_business_id").isNotNull(), lit("quarantined"))
-        .otherwise(lit("organic"))
+        (sentiment_df.event_time >= anomalous_windows.anomaly_event_time) &
+        (sentiment_df.event_time <= anomalous_windows.anomaly_event_time +
+         expr("INTERVAL 12 MINUTES")),
+        how="inner",
     )
 )
 
@@ -255,10 +255,9 @@ labeled = (
 # STEP 5: WRITE OUTPUTS
 # ══════════════════════════════════════════════════════════════
 
-# 5a. Organic reviews → S3 (drop anomaly columns which are null here)
+# 5a. All scored reviews → organic S3 path
 organic_sink = (
-    labeled
-    .filter(col("label") == "organic")
+    sentiment_df
     .select(
         "review_id", "user_id", "business_id", "stars", "text",
         "sentiment_label", "event_time", "ingestion_time", "is_injected",
@@ -273,10 +272,9 @@ organic_sink = (
     .start()
 )
 
-# 5b. Quarantined reviews → S3 (keep anomaly metadata)
+# 5b. Quarantined reviews → S3 (inner-join result keeps anomaly metadata)
 quarantine_sink = (
-    labeled
-    .filter(col("label") == "quarantined")
+    quarantined
     .select(
         "review_id", "user_id", "business_id", "stars", "text",
         "sentiment_label", "anomaly_reason",
@@ -296,8 +294,7 @@ quarantine_sink = (
 
 # 5c. Console debug — quarantined alerts only
 debug_sink = (
-    labeled
-    .filter(col("label") == "quarantined")
+    quarantined
     .select(
         "business_id", "stars", "sentiment_label",
         "anomaly_reason", "window_review_count", "window_avg_stars",

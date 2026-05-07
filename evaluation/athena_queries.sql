@@ -4,38 +4,51 @@
 
 -- ── TABLE DEFINITIONS ──
 
+-- business_id is a Hive-style partition column (folder: business_id=xxx).
+-- After CREATE, run: MSCK REPAIR TABLE organic_reviews;
+
 CREATE EXTERNAL TABLE IF NOT EXISTS organic_reviews (
-    review_id STRING,
-    business_id STRING,
-    user_id STRING,
-    stars INT,
-    text STRING,
+    review_id       STRING,
+    user_id         STRING,
+    stars           INT,
+    text            STRING,
     sentiment_label DOUBLE,
-    event_time TIMESTAMP,
-    ingestion_time TIMESTAMP
+    event_time      TIMESTAMP,
+    ingestion_time  TIMESTAMP,
+    is_injected     BOOLEAN
 )
+PARTITIONED BY (business_id STRING)
 STORED AS PARQUET
 LOCATION 's3://review-bombing-group09-841162702678-us-west-1-an/organic-reviews/'
 TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 
+MSCK REPAIR TABLE organic_reviews;
+
+
+-- After CREATE, run: MSCK REPAIR TABLE quarantined_reviews;
 
 CREATE EXTERNAL TABLE IF NOT EXISTS quarantined_reviews (
-    review_id STRING,
-    business_id STRING,
-    user_id STRING,
-    stars INT,
-    text STRING,
-    sentiment_label DOUBLE,
-    anomaly_reason STRING,
-    review_count INT,
-    avg_stars DOUBLE,
-    is_injected STRING,
-    event_time TIMESTAMP,
-    ingestion_time TIMESTAMP
+    review_id           STRING,
+    user_id             STRING,
+    stars               INT,
+    text                STRING,
+    sentiment_label     DOUBLE,
+    anomaly_reason      STRING,
+    window_review_count BIGINT,
+    window_avg_stars    DOUBLE,
+    window_std_stars    DOUBLE,
+    window_start        TIMESTAMP,
+    window_end          TIMESTAMP,
+    event_time          TIMESTAMP,
+    ingestion_time      TIMESTAMP,
+    is_injected         BOOLEAN
 )
+PARTITIONED BY (business_id STRING)
 STORED AS PARQUET
 LOCATION 's3://review-bombing-group09-841162702678-us-west-1-an/quarantined-reviews/'
 TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
+
+MSCK REPAIR TABLE quarantined_reviews;
 
 
 -- ═══════════════════════════════════════════════════════════════
@@ -44,12 +57,12 @@ TBLPROPERTIES ('parquet.compression' = 'SNAPPY');
 -- ═══════════════════════════════════════════════════════════════
 
 SELECT
-    COUNT(CASE WHEN is_injected = 'true' THEN 1 END) AS true_positives,
+    COUNT(CASE WHEN is_injected = true THEN 1 END) AS true_positives,
     COUNT(CASE WHEN is_injected IS NULL
-               OR is_injected != 'true' THEN 1 END) AS false_positives,
+               OR is_injected != true THEN 1 END) AS false_positives,
     COUNT(*) AS total_quarantined,
     ROUND(
-        CAST(COUNT(CASE WHEN is_injected = 'true' THEN 1 END) AS DOUBLE)
+        CAST(COUNT(CASE WHEN is_injected = true THEN 1 END) AS DOUBLE)
         / NULLIF(COUNT(*), 0), 4
     ) AS precision
 FROM quarantined_reviews;
@@ -61,14 +74,14 @@ FROM quarantined_reviews;
 
 WITH all_injected AS (
     SELECT COUNT(*) AS cnt
-    FROM organic_reviews WHERE is_injected = 'true'
+    FROM organic_reviews WHERE is_injected = true
     UNION ALL
     SELECT COUNT(*) AS cnt
-    FROM quarantined_reviews WHERE is_injected = 'true'
+    FROM quarantined_reviews WHERE is_injected = true
 ),
 caught AS (
     SELECT COUNT(*) AS caught_count
-    FROM quarantined_reviews WHERE is_injected = 'true'
+    FROM quarantined_reviews WHERE is_injected = true
 )
 SELECT
     c.caught_count,
@@ -87,19 +100,19 @@ FROM caught c;
 WITH metrics AS (
     SELECT
         -- Precision
-        CAST(COUNT(CASE WHEN q.is_injected = 'true' THEN 1 END) AS DOUBLE)
+        CAST(COUNT(CASE WHEN q.is_injected = true THEN 1 END) AS DOUBLE)
             / NULLIF(COUNT(*), 0) AS precision,
         -- Recall numerator
-        CAST(COUNT(CASE WHEN q.is_injected = 'true' THEN 1 END) AS DOUBLE)
+        CAST(COUNT(CASE WHEN q.is_injected = true THEN 1 END) AS DOUBLE)
             AS tp
     FROM quarantined_reviews q
 ),
 total_injected AS (
     SELECT
         (SELECT COUNT(*) FROM organic_reviews
-         WHERE is_injected = 'true')
+         WHERE is_injected = true)
       + (SELECT COUNT(*) FROM quarantined_reviews
-         WHERE is_injected = 'true') AS total
+         WHERE is_injected = true) AS total
 ),
 scores AS (
     SELECT
@@ -143,14 +156,15 @@ WHERE stars != 3;
 SELECT
     business_id,
     anomaly_reason,
-    MIN(event_time) AS attack_start,
-    MAX(event_time) AS attack_end,
-    COUNT(*) AS flagged_count,
+    MIN(event_time)  AS attack_start,
+    MAX(event_time)  AS attack_end,
+    COUNT(*)         AS flagged_count,
     ROUND(AVG(stars), 2) AS avg_stars,
+    COUNT(CASE WHEN is_injected = true THEN 1 END) AS confirmed_injected,
     COUNT(DISTINCT user_id) AS unique_attackers
 FROM quarantined_reviews
 GROUP BY business_id, anomaly_reason
-ORDER BY attack_start DESC;
+ORDER BY flagged_count DESC;
 
 
 -- ═══════════════════════════════════════════════════════════════
@@ -208,21 +222,21 @@ ORDER BY minute_bucket;
 
 SELECT
     'quarantined' AS predicted,
-    CASE WHEN is_injected = 'true' THEN 'injected'
+    CASE WHEN is_injected = true THEN 'injected'
          ELSE 'organic' END AS actual,
     COUNT(*) AS cnt
 FROM quarantined_reviews
-GROUP BY CASE WHEN is_injected = 'true' THEN 'injected'
+GROUP BY CASE WHEN is_injected = true THEN 'injected'
               ELSE 'organic' END
 
 UNION ALL
 
 SELECT
     'organic' AS predicted,
-    CASE WHEN is_injected = 'true' THEN 'injected'
+    CASE WHEN is_injected = true THEN 'injected'
          ELSE 'organic' END AS actual,
     COUNT(*) AS cnt
 FROM organic_reviews
-GROUP BY CASE WHEN is_injected = 'true' THEN 'injected'
+GROUP BY CASE WHEN is_injected = true THEN 'injected'
               ELSE 'organic' END
 ORDER BY predicted, actual;
