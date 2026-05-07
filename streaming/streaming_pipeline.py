@@ -73,6 +73,7 @@ spark = SparkSession.builder \
         "org.apache.spark.sql.execution.streaming.state."
         "HDFSBackedStateStoreProvider",
     ) \
+    .config("spark.sql.shuffle.partitions", "8") \
     .getOrCreate()
 
 spark.sparkContext.setLogLevel("WARN")
@@ -226,89 +227,145 @@ anomalous_windows = (
 
 
 # ══════════════════════════════════════════════════════════════
-# STEP 4: STREAM-STREAM JOIN WITH TIME-RANGE CONDITION
+# STEP 4: LABEL + WRITE EACH MICRO-BATCH
 #
-# Spark requires a time-range condition on stream-stream left outer joins
-# so it can bound the state it needs to retain for both sides.
-#
-# Condition: a review is labeled quarantined if its event_time falls
-# within an anomaly detection window for the same business.
+# Spark 3.5 can be brittle when analyzing a left outer stream-stream join
+# against generated window columns.  The same labeling logic is deterministic
+# within each micro-batch, so foreachBatch lets Spark handle the join as a
+# bounded DataFrame operation while preserving streaming ingestion from Kafka.
 # ══════════════════════════════════════════════════════════════
 
-labeled = (
-    sentiment_df.join(
-        anomalous_windows,
-        (sentiment_df.business_id == anomalous_windows.anom_business_id) &
-        (sentiment_df.event_time >= anomalous_windows.window_start) &
-        (sentiment_df.event_time <= anomalous_windows.window_end +
-         expr("INTERVAL 2 MINUTES")),   # small buffer for clock skew
-        how="left",
+def write_labeled_batch(batch_df, batch_id: int) -> None:
+    if batch_df.rdd.isEmpty():
+        return
+
+    batch_windows = (
+        batch_df
+        .groupBy(
+            col("business_id"),
+            window("event_time", WINDOW_DURATION, WINDOW_SLIDE),
+        )
+        .agg(
+            count("*").alias("review_count"),
+            avg("stars").alias("avg_stars"),
+            stddev("stars").alias("std_stars"),
+            count(when(col("stars") <= 2, True)).alias("neg_count"),
+        )
+        .withColumn("is_anomaly",
+            when(
+                (col("review_count") > REVIEW_COUNT_THRESHOLD) &
+                (col("avg_stars") < AVG_STARS_THRESHOLD),
+                lit(True),
+            )
+            .when(
+                (col("review_count") > REVIEW_COUNT_THRESHOLD) &
+                (col("std_stars") < STD_THRESHOLD) &
+                (col("avg_stars") < lit(COORDINATED_AVG_THRESHOLD)),
+                lit(True),
+            )
+            .when(
+                (col("review_count") >= NEG_COUNT_MIN_REVIEWS) &
+                (col("neg_count").cast(DoubleType()) / col("review_count") > NEG_RATIO_THRESHOLD),
+                lit(True),
+            )
+            .otherwise(lit(False))
+        )
+        .withColumn("anomaly_reason",
+            when(
+                (col("review_count") > REVIEW_COUNT_THRESHOLD) &
+                (col("avg_stars") < AVG_STARS_THRESHOLD),
+                lit("HIGH_VELOCITY_NEGATIVE"),
+            )
+            .when(
+                (col("review_count") > REVIEW_COUNT_THRESHOLD) &
+                (col("std_stars") < STD_THRESHOLD) &
+                (col("avg_stars") < lit(COORDINATED_AVG_THRESHOLD)),
+                lit("COORDINATED_UNIFORM_RATING"),
+            )
+            .when(
+                (col("review_count") >= NEG_COUNT_MIN_REVIEWS) &
+                (col("neg_count").cast(DoubleType()) / col("review_count") > NEG_RATIO_THRESHOLD),
+                lit("NEGATIVE_RATIO_SPIKE"),
+            )
+            .otherwise(lit("NONE"))
+        )
+        .filter(col("is_anomaly") == True)
+        .select(
+            col("business_id").alias("anom_business_id"),
+            col("window.start").alias("window_start"),
+            col("window.end").alias("window_end"),
+            col("review_count").alias("window_review_count"),
+            col("avg_stars").alias("window_avg_stars"),
+            col("std_stars").alias("window_std_stars"),
+            col("anomaly_reason"),
+        )
     )
-    .withColumn("label",
-        when(col("anom_business_id").isNotNull(), lit("quarantined"))
-        .otherwise(lit("organic"))
+
+    labeled_batch = (
+        batch_df.join(
+            batch_windows,
+            (batch_df.business_id == batch_windows.anom_business_id) &
+            (batch_df.event_time >= batch_windows.window_start) &
+            (batch_df.event_time <= batch_windows.window_end + expr("INTERVAL 2 MINUTES")),
+            how="left",
+        )
+        .withColumn("label",
+            when(col("anom_business_id").isNotNull(), lit("quarantined"))
+            .otherwise(lit("organic"))
+        )
+        .dropDuplicates(["review_id"])
     )
-)
+
+    organic_batch = (
+        labeled_batch
+        .filter(col("label") == "organic")
+        .select(
+            "review_id", "user_id", "business_id", "stars", "text",
+            "sentiment_label", "event_time", "ingestion_time", "is_injected",
+        )
+    )
+    if not organic_batch.rdd.isEmpty():
+        (
+            organic_batch.write
+            .format("parquet")
+            .mode("append")
+            .partitionBy("business_id")
+            .save(S3_ORGANIC_PATH)
+        )
+
+    quarantined_batch = (
+        labeled_batch
+        .filter(col("label") == "quarantined")
+        .select(
+            "review_id", "user_id", "business_id", "stars", "text",
+            "sentiment_label", "anomaly_reason",
+            "window_review_count", "window_avg_stars", "window_std_stars",
+            "window_start", "window_end",
+            "event_time", "ingestion_time", "is_injected",
+        )
+    )
+    if not quarantined_batch.rdd.isEmpty():
+        quarantined_batch.select(
+            "business_id", "stars", "sentiment_label",
+            "anomaly_reason", "window_review_count", "window_avg_stars",
+        ).show(truncate=False)
+        (
+            quarantined_batch.write
+            .format("parquet")
+            .mode("append")
+            .partitionBy("business_id")
+            .save(S3_QUARANTINED_PATH)
+        )
 
 
-# ══════════════════════════════════════════════════════════════
-# STEP 5: WRITE OUTPUTS
-# ══════════════════════════════════════════════════════════════
-
-# 5a. Organic reviews → S3 (drop anomaly columns which are null here)
-organic_sink = (
-    labeled
-    .filter(col("label") == "organic")
-    .select(
-        "review_id", "user_id", "business_id", "stars", "text",
-        "sentiment_label", "event_time", "ingestion_time", "is_injected",
-    )
+batch_writer = (
+    sentiment_df
     .writeStream
-    .format("parquet")
-    .option("path", S3_ORGANIC_PATH)
-    .option("checkpointLocation", S3_CHECKPOINT_ORGANIC)
-    .partitionBy("business_id")
-    .outputMode("append")
+    .foreachBatch(write_labeled_batch)
+    .option("checkpointLocation", S3_CHECKPOINT_ORGANIC.rstrip("/") + "-batch-writer/")
     .trigger(processingTime=TRIGGER_INTERVAL)
-    .start()
-)
-
-# 5b. Quarantined reviews → S3 (keep anomaly metadata)
-quarantine_sink = (
-    labeled
-    .filter(col("label") == "quarantined")
-    .select(
-        "review_id", "user_id", "business_id", "stars", "text",
-        "sentiment_label", "anomaly_reason",
-        "window_review_count", "window_avg_stars", "window_std_stars",
-        "window_start", "window_end",
-        "event_time", "ingestion_time", "is_injected",
-    )
-    .writeStream
-    .format("parquet")
-    .option("path", S3_QUARANTINED_PATH)
-    .option("checkpointLocation", S3_CHECKPOINT_QUARANTINED)
-    .partitionBy("business_id")
-    .outputMode("append")
-    .trigger(processingTime=TRIGGER_INTERVAL)
-    .start()
-)
-
-# 5c. Console debug — quarantined alerts only
-debug_sink = (
-    labeled
-    .filter(col("label") == "quarantined")
-    .select(
-        "business_id", "stars", "sentiment_label",
-        "anomaly_reason", "window_review_count", "window_avg_stars",
-    )
-    .writeStream
-    .format("console")
-    .outputMode("append")
-    .option("truncate", "false")
-    .trigger(processingTime=DEBUG_TRIGGER_INTERVAL)
     .start()
 )
 
 print("Pipeline started — waiting for termination (Ctrl+C to stop).")
-spark.streams.awaitAnyTermination()
+batch_writer.awaitTermination()
